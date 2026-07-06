@@ -61,8 +61,20 @@ bash run_tinker_server_amd.sh
 All server arguments can still be overridden through environment variables or by passing flags directly:
 
 ```bash
+INFERENCE_DISTRIBUTED_EXECUTOR_BACKEND=mp \
+INFERENCE_MAX_MODEL_LEN=4096 \
+bash run_tinker_server_amd.sh
+```
+
+```bash
 bash run_tinker_server_amd.sh --help
 ```
+
+## Rainier cluster (MI355x)
+
+If you run on the **Rainier** MI355x SLURM cluster, see [RAINIER.md](./RAINIER.md) for
+validated runtime overrides, GPU layouts, GRPO workflow notes, and SLURM reproduction
+scripts (`run_readme_reproduce_2gpu_sbatch.sh`, `run_readme_reproduce_8gpu_sbatch.sh`).
 
 ## Run The Client Smoke Test
 

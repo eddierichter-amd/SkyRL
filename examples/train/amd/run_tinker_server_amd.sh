@@ -74,6 +74,7 @@ INFERENCE_MAX_NUM_SEQS="${INFERENCE_MAX_NUM_SEQS:-256}"
 INFERENCE_MAX_MODEL_LEN="${INFERENCE_MAX_MODEL_LEN:-32768}"
 INFERENCE_GPU_MEMORY_UTILIZATION="${INFERENCE_GPU_MEMORY_UTILIZATION:-0.8}"
 INFERENCE_ENABLE_RAY_PROMETHEUS_STATS="${INFERENCE_ENABLE_RAY_PROMETHEUS_STATS:-false}"
+INFERENCE_DISTRIBUTED_EXECUTOR_BACKEND="${INFERENCE_DISTRIBUTED_EXECUTOR_BACKEND:-ray}"
 
 BACKEND_CONFIG="${BACKEND_CONFIG:-$(cat <<JSON
 {
@@ -85,6 +86,7 @@ BACKEND_CONFIG="${BACKEND_CONFIG:-$(cat <<JSON
 
     "generator.inference_engine.num_engines": ${INFERENCE_NUM_ENGINES},
     "generator.inference_engine.tensor_parallel_size": ${INFERENCE_TENSOR_PARALLEL_SIZE},
+    "generator.inference_engine.distributed_executor_backend": "${INFERENCE_DISTRIBUTED_EXECUTOR_BACKEND}",
     "generator.inference_engine.max_num_batched_tokens": ${INFERENCE_MAX_NUM_BATCHED_TOKENS},
     "generator.inference_engine.enable_ray_prometheus_stats": ${INFERENCE_ENABLE_RAY_PROMETHEUS_STATS},
     "generator.inference_engine.gpu_memory_utilization": ${INFERENCE_GPU_MEMORY_UTILIZATION},
