@@ -147,6 +147,9 @@ class VLLMServerActor(ServerActorProtocol):
         os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "1"
         # TODO (aaron): once native ipc stops needing this, remove
         os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+        # Avoid vLLM V1 worker spawn failures when CUDA is already initialized
+        # (for example after FSDP policy load on AMD/ROCm).
+        os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
         # Configure the distributed executor backend
         self._cli_args.distributed_executor_backend = distributed_executor_backend

@@ -61,6 +61,14 @@ bash run_tinker_server_amd.sh
 All server arguments can still be overridden through environment variables or by passing flags directly:
 
 ```bash
+INFERENCE_DISTRIBUTED_EXECUTOR_BACKEND=mp \
+INFERENCE_MAX_MODEL_LEN=4096 \
+bash run_tinker_server_amd.sh
+```
+
+Or pass flags directly:
+
+```bash
 bash run_tinker_server_amd.sh --help
 ```
 
@@ -108,6 +116,49 @@ python grpo_client.py \
   --max-train-examples 32 \
   --max-val-examples 8
 ```
+
+On the FSDP backend, run GRPO against a **fresh** Tinker server after
+`tinker_hello_world.py`. The FSDP worker supports one LoRA adapter per worker
+group, so a second training client on the same server fails with
+`register_adapter is not implemented`.
+
+## ROCm Runtime Notes
+
+When training and inference are split across GPUs (`colocate_all=false`), vLLM
+may fail to start after FSDP initializes CUDA unless multiprocessing is
+disabled. `VLLMServerActor` sets `VLLM_ENABLE_V1_MULTIPROCESSING=0` for this
+reason.
+
+For AMD/ROCm clusters, also set these environment variables before starting the
+server (validated on MI355x):
+
+```bash
+export VLLM_ENABLE_V1_MULTIPROCESSING=0
+export VLLM_USE_V1=1
+export INFERENCE_DISTRIBUTED_EXECUTOR_BACKEND=mp
+export INFERENCE_MAX_MODEL_LEN=4096
+export INFERENCE_MAX_NUM_BATCHED_TOKENS=8192
+export INFERENCE_MAX_NUM_SEQS=64
+export INFERENCE_GPU_MEMORY_UTILIZATION=0.5
+```
+
+`run_tinker_server_amd.sh` exposes `INFERENCE_DISTRIBUTED_EXECUTOR_BACKEND`
+(default `ray`). Use `mp` on ROCm when vLLM fails to initialize after the
+policy worker loads.
+
+## SLURM Reproduction Scripts
+
+From the repository root, submit end-to-end validation jobs:
+
+```bash
+# 8-GPU README-default layout (INFERENCE_NUM_ENGINES=6)
+sbatch examples/train/amd/run_readme_reproduce_8gpu_sbatch.sh
+
+# 2-GPU smoke layout (INFERENCE_NUM_ENGINES=1)
+sbatch examples/train/amd/run_readme_reproduce_2gpu_sbatch.sh
+```
+
+Logs are written under `logs/` relative to the submission directory.
 
 ## Multi-Node Note
 
