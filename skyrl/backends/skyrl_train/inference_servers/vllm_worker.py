@@ -36,9 +36,9 @@ class WorkerWrap(LayerwiseReloadWorkerMixin):
 
     Methods:
         init_weight_update_communicator: Initialize the weight receiver
-        start_weight_update: Begin a sync; initialize vLLM layerwise reload once
+        skyrl_start_weight_update: Begin a sync; initialize vLLM layerwise reload once
         load_weights: Receive and load one chunk of weights from trainer
-        finish_weight_update: End a sync; finalize vLLM layerwise reload once
+        skyrl_finish_weight_update: End a sync; finalize vLLM layerwise reload once
         teardown_weight_receiver: Clean up weight receiver resources
     """
 

@@ -192,13 +192,13 @@ class MoeEngineActor:
         await self.engine.collective_rpc("init_weight_update_communicator", args=(init_info,))
 
     async def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
-        await self.engine.collective_rpc("start_weight_update", args=(is_checkpoint_format,))
+        await self.engine.collective_rpc("skyrl_start_weight_update", args=(is_checkpoint_format,))
 
     async def load_weights(self, request: bytes) -> None:
         await self.engine.collective_rpc("load_weights", args=(request,))
 
     async def finish_weight_update(self) -> None:
-        await self.engine.collective_rpc("finish_weight_update")
+        await self.engine.collective_rpc("skyrl_finish_weight_update")
 
 
 async def _run_legacy_ipc_send(engine_actor, snapshot_path: str, init_info) -> None:

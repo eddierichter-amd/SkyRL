@@ -6,7 +6,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import ray
 from omegaconf import DictConfig, ListConfig
-from ray.util.placement_group import PlacementGroupSchedulingStrategy
+
+try:
+    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+except ImportError:
+    from ray.util.placement_group import PlacementGroupSchedulingStrategy
 
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
     ErrorInfo,
@@ -251,7 +255,10 @@ def get_rendezvous_addr_port(placement_group, pg_index: int) -> Tuple[str, int]:
 
     @ray.remote(num_cpus=0, num_gpus=0)
     def get_addr_port():
-        from ray.experimental.collective.util import get_address_and_port
+        try:
+            from ray.experimental.collective.util import get_address_and_port
+        except ImportError:
+            from ray.util.collective.collective import get_address_and_port
 
         return get_address_and_port()
 

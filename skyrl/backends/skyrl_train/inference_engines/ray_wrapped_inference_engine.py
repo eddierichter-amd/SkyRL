@@ -8,7 +8,12 @@ if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
         WeightSyncInitInfo,
     )
-from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group
+from ray.util.placement_group import placement_group
+
+try:
+    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+except ImportError:
+    from ray.util.placement_group import PlacementGroupSchedulingStrategy
 
 from skyrl.backends.skyrl_train.inference_engines.base import (
     InferenceEngineInput,
@@ -163,10 +168,23 @@ def create_ray_wrapped_inference_engines(
     inference_engine_actors = []
     noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
 
-    # Engine-actor runtime_env (env vars are applied before CUDA init and inherited by the
-    # vLLM worker child tasks). Currently just the expandable_segments allocator, which is
-    # safe with sleep mode on vLLM >= 0.20.1.
-    engine_runtime_env = build_engine_runtime_env(use_expandable_segments=use_expandable_segments)
+    # Engine-actor runtime_env is applied before CUDA/HIP init and inherited by vLLM workers.
+    extra_engine_env = None
+    try:
+        import torch as _torch_engine_env
+
+        if getattr(_torch_engine_env.version, "hip", None) is not None:
+            extra_engine_env = {
+                "VLLM_USE_V1": "0",
+                "VLLM_TARGET_DEVICE": "rocm",
+                "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+            }
+    except ImportError:
+        extra_engine_env = None
+    engine_runtime_env = build_engine_runtime_env(
+        use_expandable_segments=use_expandable_segments,
+        extra_env_vars=extra_engine_env,
+    )
 
     resolved_executor_backend = (
         "uni" if (tensor_parallel_size == 1 and pipeline_parallel_size == 1) else distributed_executor_backend
@@ -294,42 +312,60 @@ def create_ray_wrapped_inference_engines(
                 if mp_gpu_ids_str is not None:
                     mp_kwargs["mp_cuda_visible_devices"] = mp_gpu_ids_str
 
+                remote_kwargs = {
+                    "model": pretrain,
+                    "enforce_eager": enforce_eager,
+                    "language_model_only": language_model_only,
+                    "worker_extension_cls": "skyrl.backends.skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
+                    "tensor_parallel_size": tensor_parallel_size,
+                    "pipeline_parallel_size": pipeline_parallel_size,
+                    "enable_expert_parallel": expert_parallel_size > 1,
+                    "distributed_executor_backend": resolved_executor_backend,
+                    "seed": seed + i * data_parallel_size + dp_rank,
+                    "enable_prefix_caching": enable_prefix_caching,
+                    "dtype": model_dtype,
+                    "trust_remote_code": True,
+                    "vllm_v1_disable_multiproc": vllm_v1_disable_multiproc,
+                    "gpu_memory_utilization": gpu_memory_utilization,
+                    "bundle_indices": dp_rank_bundles,
+                    "num_gpus": 0.2 if use_hybrid_engine else 1,
+                    "enable_sleep_mode": inference_engine_enable_sleep,
+                    "noset_visible_devices": noset_visible_devices,
+                    "max_num_batched_tokens": max_num_batched_tokens,
+                    "max_num_seqs": max_num_seqs,
+                    "max_logprobs": 1,  # only need chosen-token logprobs
+                    "enable_ray_prometheus_stats": enable_ray_prometheus_stats,
+                    "enable_return_routed_experts": enable_return_routed_experts,
+                }
+                # Merge extras after so Hydra engine_init_kwargs can override without
+                # duplicating keywords (e.g. enable_sleep_mode=false).
+                remote_kwargs.update(dp_kwargs)
+                remote_kwargs.update(engine_init_kwargs)
+                remote_kwargs.update(lora_kwargs)
+                remote_kwargs.update(rope_engine_kwargs)
+                remote_kwargs.update(other_kwargs)
+                remote_kwargs.update(mp_kwargs)
+                if "enable_sleep_mode" in remote_kwargs:
+                    inference_engine_enable_sleep = bool(remote_kwargs["enable_sleep_mode"])
+                actor_runtime_env = engine_runtime_env
+                # HIP: pin visible devices before the actor imports torch/vLLM.
+                # Changing HIP/CUDA_VISIBLE_DEVICES after `import torch` does not
+                # retarget profiling, so colocated engines would share one card.
+                if extra_engine_env is not None:
+                    vis = ",".join(
+                        str(int(shared_pg.bundle_gpu_ids[logical_dp_base + k])) for k in range(tp_pp_size)
+                    )
+                    env_vars = dict((engine_runtime_env or {}).get("env_vars", {}))
+                    env_vars["HIP_VISIBLE_DEVICES"] = vis
+                    env_vars["ROCR_VISIBLE_DEVICES"] = vis
+                    env_vars["CUDA_VISIBLE_DEVICES"] = vis
+                    actor_runtime_env = {"env_vars": env_vars}
                 engine = actor_class.options(
                     num_cpus=num_gpus_per_actor,
                     num_gpus=num_gpus_per_actor,
                     scheduling_strategy=dp_rank_sched,
-                    runtime_env=engine_runtime_env,
-                ).remote(
-                    model=pretrain,
-                    enforce_eager=enforce_eager,
-                    language_model_only=language_model_only,
-                    worker_extension_cls="skyrl.backends.skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
-                    tensor_parallel_size=tensor_parallel_size,
-                    pipeline_parallel_size=pipeline_parallel_size,
-                    enable_expert_parallel=expert_parallel_size > 1,
-                    distributed_executor_backend=resolved_executor_backend,
-                    seed=seed + i * data_parallel_size + dp_rank,
-                    enable_prefix_caching=enable_prefix_caching,
-                    dtype=model_dtype,
-                    trust_remote_code=True,
-                    vllm_v1_disable_multiproc=vllm_v1_disable_multiproc,
-                    gpu_memory_utilization=gpu_memory_utilization,
-                    bundle_indices=dp_rank_bundles,
-                    num_gpus=0.2 if use_hybrid_engine else 1,
-                    enable_sleep_mode=inference_engine_enable_sleep,
-                    noset_visible_devices=noset_visible_devices,
-                    max_num_batched_tokens=max_num_batched_tokens,
-                    max_num_seqs=max_num_seqs,
-                    max_logprobs=1,  # only need chosen-token logprobs
-                    enable_ray_prometheus_stats=enable_ray_prometheus_stats,
-                    enable_return_routed_experts=enable_return_routed_experts,
-                    **dp_kwargs,
-                    **engine_init_kwargs,
-                    **lora_kwargs,
-                    **rope_engine_kwargs,
-                    **other_kwargs,
-                    **mp_kwargs,
-                )
+                    runtime_env=actor_runtime_env,
+                ).remote(**remote_kwargs)
                 inference_engine_actors.append(engine)
 
     engines = [RayWrappedInferenceEngine(actor_handle) for actor_handle in inference_engine_actors]

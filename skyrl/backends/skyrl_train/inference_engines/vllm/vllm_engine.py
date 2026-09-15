@@ -13,6 +13,9 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import ray
+
+# Load the PyTorch ROCm runtime before vLLM and its optional compiler plugins.
+import torch
 import vllm
 from loguru import logger
 from vllm import SamplingParams
@@ -26,13 +29,11 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionResponse,
 )
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
-from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.openai.models.serving import (
     BaseModelPath,
     OpenAIModelRegistry,
     OpenAIServingModels,
 )
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.inputs import TokensPrompt
 from vllm.lora.request import LoRARequest
 
@@ -42,6 +43,13 @@ from skyrl.backends.skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
 )
 from skyrl.backends.skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
+from skyrl.backends.skyrl_train.inference_engines.vllm.vllm_import_compat import (
+    ErrorInfo,
+    ErrorResponse,
+    OpenAIServingRender,
+    openai_serving_chat_uses_online_renderer,
+    request_logger_class,
+)
 
 # Backward compatibility: WorkerWrap has moved to inference_servers.vllm_worker
 # This alias preserves the old import path for existing scripts/configs.
@@ -59,29 +67,66 @@ class Logprob:
     token_id: str
 
 
+def _torch_is_rocm() -> bool:
+    return getattr(torch.version, "hip", None) is not None
+
+
+def _sanitize_ray_gpu_id(gpu_id) -> str:
+    """Normalize the scalar GPU identifiers returned by Ray."""
+    if isinstance(gpu_id, (list, tuple)):
+        gpu_id = gpu_id[0] if gpu_id else 0
+    gid = str(gpu_id).split(",")[0].strip()
+    try:
+        gid = str(int(float(gid)))
+    except ValueError:
+        pass
+    if not gid:
+        raise RuntimeError(f"could not parse Ray GPU id {gpu_id!r}")
+    return gid
+
+
+def _set_ray_assigned_visible_device(gpu_id: str) -> None:
+    """Map Ray's assigned GPU to the visible-device env vars for the active stack."""
+    gid = _sanitize_ray_gpu_id(gpu_id)
+    if _torch_is_rocm():
+        # Some ROCm libraries use CUDA_VISIBLE_DEVICES through PyTorch's
+        # CUDA-compatible API, so keep all three masks aligned.
+        os.environ["HIP_VISIBLE_DEVICES"] = gid
+        os.environ["ROCR_VISIBLE_DEVICES"] = gid
+        os.environ["CUDA_VISIBLE_DEVICES"] = gid
+        logger.info(f"ROCm: HIP/ROCR/CUDA_VISIBLE_DEVICES={gid} (ray gpu_id={gpu_id!r})")
+    else:
+        os.environ["CUDA_VISIBLE_DEVICES"] = gid
+        logger.info(f"CUDA: setting CUDA_VISIBLE_DEVICES={gid}")
+
+
 def setup_envvars_for_vllm(kwargs, bundle_indices):
     noset_visible_devices = kwargs.pop("noset_visible_devices")
     mp_cuda_visible_devices = kwargs.pop("mp_cuda_visible_devices", None)
 
     if kwargs.get("distributed_executor_backend") == "mp" and mp_cuda_visible_devices is not None:
-        # For mp backend in colocated mode, set CUDA_VISIBLE_DEVICES to the
-        # pre-computed GPU IDs for this engine so spawned workers see the
-        # correct GPUs (not all GPUs on the node).
-        os.environ["CUDA_VISIBLE_DEVICES"] = mp_cuda_visible_devices
-        os.environ.pop("ROCR_VISIBLE_DEVICES", None)
-        os.environ.pop("HIP_VISIBLE_DEVICES", None)
-        logger.info(f"mp backend: setting CUDA_VISIBLE_DEVICES={mp_cuda_visible_devices}")
+        # For mp backend in colocated mode, set visible devices for spawned workers.
+        if _torch_is_rocm():
+            mp_ids = ",".join(_sanitize_ray_gpu_id(x) for x in str(mp_cuda_visible_devices).split(",") if x.strip())
+            os.environ["HIP_VISIBLE_DEVICES"] = mp_ids
+            os.environ["ROCR_VISIBLE_DEVICES"] = mp_ids
+            os.environ["CUDA_VISIBLE_DEVICES"] = mp_ids
+            logger.info(f"mp backend (ROCm): HIP/ROCR/CUDA_VISIBLE_DEVICES={mp_ids}")
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = mp_cuda_visible_devices
+            os.environ.pop("ROCR_VISIBLE_DEVICES", None)
+            os.environ.pop("HIP_VISIBLE_DEVICES", None)
+            logger.info(f"mp backend: setting CUDA_VISIBLE_DEVICES={mp_cuda_visible_devices}")
     elif kwargs.get("distributed_executor_backend") in ("ray", "mp"):
-        # For ray backend (and non-colocate mp), clear CUDA_VISIBLE_DEVICES
-        # so vLLM workers can discover GPUs via their own scheduling.
-        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-        os.environ.pop("ROCR_VISIBLE_DEVICES", None)
-        os.environ.pop("HIP_VISIBLE_DEVICES", None)
+        # For ray backend (and non-colocate mp), clear CUDA overrides on NVIDIA.
+        # On ROCm leave HIP/ROCR/CUDA aligned; popping CUDA makes vLLM v1 device_type "".
+        if not _torch_is_rocm():
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+            os.environ.pop("ROCR_VISIBLE_DEVICES", None)
+            os.environ.pop("HIP_VISIBLE_DEVICES", None)
     elif noset_visible_devices:
-        # We need to set CUDA_VISIBLE_DEVICES to the ray assigned GPU
-        # when the distributed_executor_backend is not ray/mp and
-        # RAY_EXPERIMENTAL_NOSET_*_VISIBLE_DEVICES is set.
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(ray.get_gpu_ids()[0])
+        # When Ray does not set visible devices, map the assigned GPU explicitly.
+        _set_ray_assigned_visible_device(str(ray.get_gpu_ids()[0]))
 
     num_gpus = kwargs.pop("num_gpus")
     if bundle_indices is not None:
@@ -101,6 +146,15 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         redirect_actor_output_to_file()
 
         setup_envvars_for_vllm(kwargs, bundle_indices)
+        if _torch_is_rocm():
+            os.environ["VLLM_USE_V1"] = "0"
+            os.environ.setdefault("VLLM_TARGET_DEVICE", "rocm")
+            os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+            # Colocated GRPO can leave a multi-GPU HIP mask on every actor.
+            # Pin to the Ray-assigned GPU so vLLM profiles one card.
+            gpu_ids = ray.get_gpu_ids()
+            if gpu_ids:
+                _set_ray_assigned_visible_device(str(gpu_ids[0]))
         vllm_v1_disable_multiproc = kwargs.pop("vllm_v1_disable_multiproc", False)
         if vllm_v1_disable_multiproc:
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -376,13 +430,13 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         engine = self._get_engine()
         return await asyncio.to_thread(
             engine.collective_rpc,
-            "start_weight_update",
+            "skyrl_start_weight_update",
             args=(is_checkpoint_format,),
         )
 
     async def finish_weight_update(self):
         engine = self._get_engine()
-        return await asyncio.to_thread(engine.collective_rpc, "finish_weight_update")
+        return await asyncio.to_thread(engine.collective_rpc, "skyrl_finish_weight_update")
 
 
 class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
@@ -425,47 +479,66 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # Optionally limit logged chars: generator.inference_engine.engine_init_kwargs.max_log_len=256
         request_logger = None
         if enable_log_requests:
-            from vllm.entrypoints.logger import RequestLogger
-
+            RequestLogger = request_logger_class()
             request_logger = RequestLogger(max_log_len=max_log_len)
 
         chat_template = openai_kwargs.pop("chat_template", None)
 
         from vllm.renderers import renderer_from_config
 
-        model_registry = OpenAIModelRegistry(
-            model_config=engine.model_config,
-            base_model_paths=base_model_paths,
-        )
         renderer = renderer_from_config(engine.vllm_config)
-        openai_serving_render = OpenAIServingRender(
-            model_config=engine.model_config,
-            renderer=renderer,
-            model_registry=model_registry,
-            request_logger=request_logger,
-            chat_template=chat_template,
-            chat_template_content_format="auto",
-        )
 
-        self.openai_serving_chat = OpenAIServingChat(
-            engine_client=engine,
-            models=models,
-            response_role="assistant",
-            openai_serving_render=openai_serving_render,
-            request_logger=request_logger,
-            chat_template=chat_template,
-            chat_template_content_format="auto",
-            **openai_kwargs,
-        )
-
-        # TODO(Charlie): revisit kwargs `return_tokens_as_token_ids`,
-        # `enable_prompt_tokens_details`, `enable_force_include_usage`.
-        self.openai_serving_completion = OpenAIServingCompletion(
-            engine_client=engine,
-            models=models,
-            openai_serving_render=openai_serving_render,
-            request_logger=request_logger,
-        )
+        if openai_serving_chat_uses_online_renderer():
+            self.openai_serving_chat = OpenAIServingChat(
+                engine_client=engine,
+                models=models,
+                response_role="assistant",
+                online_renderer=renderer,
+                request_logger=request_logger,
+                chat_template=chat_template,
+                chat_template_content_format="auto",
+                **openai_kwargs,
+            )
+            self.openai_serving_completion = OpenAIServingCompletion(
+                engine_client=engine,
+                models=models,
+                online_renderer=renderer,
+                request_logger=request_logger,
+            )
+        else:
+            if OpenAIServingRender is None:
+                raise RuntimeError(
+                    "Unsupported vLLM OpenAI rendering API: expected "
+                    "OpenAIServingRender or the online_renderer interface"
+                )
+            model_registry = OpenAIModelRegistry(
+                model_config=engine.model_config,
+                base_model_paths=base_model_paths,
+            )
+            openai_serving_render = OpenAIServingRender(
+                model_config=engine.model_config,
+                renderer=renderer,
+                model_registry=model_registry,
+                request_logger=request_logger,
+                chat_template=chat_template,
+                chat_template_content_format="auto",
+            )
+            self.openai_serving_chat = OpenAIServingChat(
+                engine_client=engine,
+                models=models,
+                response_role="assistant",
+                openai_serving_render=openai_serving_render,
+                request_logger=request_logger,
+                chat_template=chat_template,
+                chat_template_content_format="auto",
+                **openai_kwargs,
+            )
+            self.openai_serving_completion = OpenAIServingCompletion(
+                engine_client=engine,
+                models=models,
+                openai_serving_render=openai_serving_render,
+                request_logger=request_logger,
+            )
         return engine
 
     def _create_ray_prometheus_stat_loggers(self):
@@ -606,13 +679,13 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def start_weight_update(self, is_checkpoint_format: bool = True):
         engine = self._get_engine()
         return await engine.collective_rpc(
-            "start_weight_update",
+            "skyrl_start_weight_update",
             args=(is_checkpoint_format,),
         )
 
     async def finish_weight_update(self):
         engine = self._get_engine()
-        return await engine.collective_rpc("finish_weight_update")
+        return await engine.collective_rpc("skyrl_finish_weight_update")
 
     # ----------------------------------------
     # Methods for handling OpenAI API requests

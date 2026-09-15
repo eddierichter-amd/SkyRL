@@ -10,6 +10,9 @@ from argparse import Namespace
 from typing import List, Optional, Tuple
 
 import httpx
+
+# Initialize the PyTorch ROCm runtime before importing vLLM compiler plugins.
+import torch  # noqa: F401
 import uvicorn
 import vllm.envs as envs
 from fastapi import HTTPException, Request

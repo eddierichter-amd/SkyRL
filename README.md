@@ -31,6 +31,8 @@ For a guide on developing with SkyRL, take at look at our [Development Guide](ht
 
 For model training, checkout [`skyrl`](./skyrl) to start using, modifying, or building on top of the SkyRL training stack. See our [quickstart docs](https://docs.skyrl.ai/docs/index) to ramp up!
 
+For Megatron GRPO on AMD Instinct GPUs, see the [ROCm integration guide](./integrations/rocm_amd/README.md).
+
 For building environments, checkout [`skyrl-gym`](./skyrl-gym) to integrate your task in the simple gymnasium interface.
 
 For agentic pipelines, check out [`skyrl-agent`](./skyrl-agent) for our work on optimizing and scaling pipelines for multi-turn tool use LLMs on long-horizon, real-environment tasks.

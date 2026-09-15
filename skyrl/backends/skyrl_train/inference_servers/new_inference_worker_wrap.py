@@ -70,7 +70,7 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
                 - ipc_handles_pickled: b64(pickle({gpu_uuid: (func, args)}))
         """
         if not getattr(self, "_skyrl_weight_update_active", False):
-            raise RuntimeError("start_weight_update must be called before update_weights_ipc.")
+            raise RuntimeError("skyrl_start_weight_update must be called before update_weights_ipc.")
 
         if self.weight_transfer_engine is None:
             raise RuntimeError(
@@ -141,7 +141,7 @@ class NewInferenceWorkerWrap(LayerwiseReloadWorkerMixin):
         https://github.com/vllm-project/vllm/pull/42577
         """
         if not getattr(self, "_skyrl_weight_update_active", False):
-            raise RuntimeError("start_weight_update must be called before update_weights_nccl.")
+            raise RuntimeError("skyrl_start_weight_update must be called before update_weights_nccl.")
 
         if self.weight_transfer_engine is None:
             raise RuntimeError(

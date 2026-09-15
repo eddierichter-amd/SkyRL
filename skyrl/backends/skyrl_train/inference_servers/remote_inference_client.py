@@ -1132,7 +1132,7 @@ class RemoteInferenceClient:
         return await self._call_all_servers(
             "/collective_rpc",
             {
-                "method": "start_weight_update",
+                "method": "skyrl_start_weight_update",
                 "kwargs": {"is_checkpoint_format": is_checkpoint_format},
             },
         )
@@ -1204,7 +1204,7 @@ class RemoteInferenceClient:
         """
         return await self._call_all_servers(
             "/collective_rpc",
-            {"method": "finish_weight_update"},
+            {"method": "skyrl_finish_weight_update"},
         )
 
     async def load_lora_adapter(

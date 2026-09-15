@@ -1,6 +1,8 @@
 import os
 import signal
 
+# Initialize the PyTorch ROCm runtime before importing vLLM compiler plugins.
+import torch  # noqa: F401
 import uvloop
 import vllm.envs as envs
 from fastapi import Request
